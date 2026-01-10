@@ -138,8 +138,11 @@ JURISDICTION_SOURCES = {
     ],
 
     "Québec": [
-        "https://www.quebec.ca/en/government/policies-orientations/artificial-intelligence",
-        "https://www.quebec.ca/en/government/policies-orientations/digital-strategy",
+        "https://cdn-contenu.quebec.ca/cdn-contenu/adm/min/economie/publications-adm/politique/PO_SQRI2_2022-2027_MEI_EN.pdf",
+        "https://cdn-contenu.quebec.ca/cdn-contenu/education/Numerique/continuum-cadre-reference-num-VA.pdf",
+        "https://cdn-contenu.quebec.ca/cdn-contenu/adm/min/finances/publications-adm/Budget/2526/Budget2526_InnovatingToProsper.pdf",
+        "https://cdn-contenu.quebec.ca/cdn-contenu/adm/min/finances/publications-adm/Budget/2526/Budget2526_AdditionalInfo.pdf",
+        "https://cdn-contenu.quebec.ca/cdn-contenu/adm/min/finances/publications-adm/Mise_a_jour_economique/2023/AUTEN_FasciculeUpdateNov2023.pdf",
         "https://api.forum-ia.devbeet.com/app/uploads/2020/09/ai-strategy_en-acj-19-juin-v8.pdf?utm_source=chatgpt.com", 
     ],
 
@@ -159,8 +162,9 @@ JURISDICTION_SOURCES = {
     ],
 
     "Saskatchewan": [
-        "https://www.saskatchewan.ca/government/government-data/digital-government",
+        "https://www.saskatchewan.ca/government/news-and-media/2024/june/07/saskatchewan-advocates-for-federal-ai-voice-cloning-restrictions",
         "https://taskroom.saskatchewan.ca/services-and-support/information-technology/artificial-intelligence/generative-artificial-intelligence-guidelines",
+        "file:///C:/Users/dwplu/Downloads/Artificial%20Intelligence%20Guidelines%20(3).pdf",
     ],
    
     "Prince Edward Island": [
