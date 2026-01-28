@@ -106,6 +106,8 @@ JURISDICTION_SOURCES = {
         "https://www.canada.ca/en/government/system/digital-government/digital-government-innovations/responsible-use-ai/principles.html",
         "https://open.canada.ca/data/en/dataset/fcbc0200-79ba-4fa4-94a6-00e32facea6b",
         "https://www.canada.ca/en/innovation-science-economic-development/news/2025/09/government-of-canada-launches-ai-strategy-task-force-and-public-engagement-on-the-development-of-the-next-ai-strategy.html",
+        "https://www.canada.ca/en/government/system/digital-government/digital-government-innovations/guide-departmental-ai-responsibilities.html",
+        "https://ised-isde.canada.ca/site/ised/en/enabling-large-scale-sovereign-ai-data-centres",
         # Policy Horizons Canada (foresight & AI futures)
         "https://horizons.service.canada.ca/en/2025/02/10/ai-policy-consideration/index.shtml",
         # Health Canada
