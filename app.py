@@ -166,7 +166,6 @@ JURISDICTION_SOURCES = {
     "Saskatchewan": [
         "https://www.saskatchewan.ca/government/news-and-media/2024/june/07/saskatchewan-advocates-for-federal-ai-voice-cloning-restrictions",
         "https://taskroom.saskatchewan.ca/services-and-support/information-technology/artificial-intelligence/generative-artificial-intelligence-guidelines",
-        "file:///C:/Users/dwplu/Downloads/Artificial%20Intelligence%20Guidelines%20(3).pdf",
     ],
    
     "Prince Edward Island": [
@@ -401,9 +400,6 @@ The user is asking about AI policy for the **{canonical}** government in Canada.
 
 **User question:**  
 {question}
-
-Below are excerpts from official policy/framework pages for this jurisdiction:
-\"\"\"{trimmed_corpus}\"\"\"
 
 Below are excerpts from official policy/framework pages for this jurisdiction:
 \"\"\"{trimmed_corpus}\"\"\"
