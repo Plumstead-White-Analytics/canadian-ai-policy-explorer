@@ -26,7 +26,31 @@ def set_canada_question(q: str):
 def go_home():
     st.session_state["mode"] = "Ask about one government"
 
+# ---- OpenAI client ----
 client = OpenAI()
+
+# ---- Corpus Trimming Helper ----
+def trim_corpus_keep_head_tail(corpus: str, max_chars: int) -> str:
+    """
+    Trims corpus to a character budget while preserving both
+    the beginning and end of long documents.
+    Helps avoid losing important later sections in long corpora.
+    """
+    if not corpus:
+        return ""
+
+    if len(corpus) <= max_chars:
+        return corpus
+
+    half = max_chars // 2
+    head = corpus[:half]
+    tail = corpus[-half:]
+    return head + "\n\n...[content omitted for length]...\n\n" + tail
+
+# ---- Guardrail Helper ----
+import re
+CANADIAN_HINTS = [...]
+
 
 # ---- Guardrail Helper ----
 
@@ -384,9 +408,9 @@ def answer_ai_policy_question(jurisdiction: str, question: str) -> str:
         "it will be incorporated into future summaries.\n"
         )
      
-    # Limit token load for GPT
-    max_chars = 16000
-    trimmed_corpus = corpus[:max_chars]
+    # Limit INPUT size sent to the model (character-based cap on the corpus excerpt)
+    max_chars = 50000  # increase as corpus grows (esp. federal)
+    trimmed_corpus = trim_corpus_keep_head_tail(corpus, max_chars)
 
     system_prompt = (
         "You are an expert assistant that summarizes and explains Canadian government "
@@ -422,6 +446,7 @@ Below are excerpts from official policy/framework pages for this jurisdiction:
             {"role": "user", "content": user_prompt},
         ],
         temperature=0.2,
+        max_tokens=1200,  # cap output length (completion tokens)
     )
 
     return response.choices[0].message.content
@@ -487,10 +512,11 @@ What this means in practice:
 - For **{missing_name}**, please refer to its official government website for AI policy or digital strategy updates.
 """.strip()
 
-    # Trim (to avoid token overload)
-    max_chars = 12000
-    corpus1_trim = corpus1[:max_chars]
-    corpus2_trim = corpus2[:max_chars]
+    # Limit INPUT size sent to the model (character-based corpus cap)
+    max_chars = 50000  # increased to accommodate growing corpora
+
+    corpus1_trim = trim_corpus_keep_head_tail(corpus1, max_chars)
+    corpus2_trim = trim_corpus_keep_head_tail(corpus2, max_chars)
 
     j1_label = c1
     j2_label = c2
@@ -544,6 +570,7 @@ Instructions:
             {"role": "user", "content": user_prompt},
         ],
         temperature=0.2,
+        max_tokens=1200,  # cap output length (completion tokens) 
     )
 
     return response.choices[0].message.content
@@ -583,10 +610,11 @@ def answer_canada_wide(question: str) -> str:
             "curated federal, provincial, or territorial sources. Please try again later."
         )
 
-    # Combine and limit for GPT
+    # ---- Limit INPUT size sent to the model (character-based corpus cap) ----
+    # This controls how much policy text is sent INTO GPT.
     full_text = "\n\n".join(corpora)
-    max_chars = 16000
-    trimmed = full_text[:max_chars]
+    max_chars = 50000  # Increased to accommodate expanded Canada-wide corpus
+    trimmed = trim_corpus_keep_head_tail(full_text, max_chars)
 
     system_prompt = (
         "You are an expert assistant that summarizes and explains Canadian AI policy, directives, "
@@ -628,6 +656,7 @@ Below are excerpts from curated federal, provincial, and territorial AI policy o
             {"role": "user", "content": user_prompt},
         ],
         temperature=0.2,
+        max_tokens=1200,  # cap output length (completion tokens)
     )
 
     return response.choices[0].message.content
