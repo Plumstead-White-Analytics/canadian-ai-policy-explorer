@@ -7,6 +7,10 @@ from bs4 import BeautifulSoup
 from openai import OpenAI
 import streamlit as st
 from datetime import datetime
+# Concurrency tools for parallel URL fetching
+from concurrent.futures import ThreadPoolExecutor, as_completed
+# Safe temporary file handling (avoids filename collisions in multi-user Streamlit)
+import tempfile
 
 # ---- Helper function for Streamlit User Interface (UI) for single goverment response ----
 def set_single_question(q: str):
@@ -46,6 +50,54 @@ def trim_corpus_keep_head_tail(corpus: str, max_chars: int) -> str:
     head = corpus[:half]
     tail = corpus[-half:]
     return head + "\n\n...[content omitted for length]...\n\n" + tail
+
+# ---- Helper function to fetch multiple URLs in parallel ----
+def fetch_all_text_parallel(urls: list[str], max_workers: int = 6) -> list[str]:
+    """
+    Fetch multiple URLs concurrently and return a list of extracted text chunks.
+
+    Why:
+        - Reduces time when multiple URLs must be fetched.
+        - Especially helpful for the growing Federal corpus.
+
+    Parameters:
+        urls: list of URLs to fetch
+        max_workers: max number of parallel threads (conservative default for Streamlit)
+
+    Returns:
+        List of successfully extracted text blocks.
+    """
+
+    # Safety: if no URLs provided, return empty list
+    if not urls:
+        return []
+
+    # Do not create more threads than URLs
+    worker_count = min(max_workers, len(urls))
+
+    pieces: list[str] = []
+
+    # ThreadPoolExecutor runs fetches concurrently
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+
+        # Submit each URL fetch as a separate thread task
+        future_to_url = {
+            executor.submit(fetch_text_from_url, url): url
+            for url in urls
+        }
+
+        # As each fetch completes, collect its result
+        for future in as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                text = future.result()
+                if text:
+                    pieces.append(text)
+            except Exception as e:
+                # Fail gracefully per-URL (do not crash entire request)
+                print(f"  !! Error fetching {url}: {e}")
+
+    return pieces
 
 # ---- Guardrail Helper ----
 import re
@@ -132,6 +184,7 @@ JURISDICTION_SOURCES = {
         "https://www.canada.ca/en/innovation-science-economic-development/news/2025/09/government-of-canada-launches-ai-strategy-task-force-and-public-engagement-on-the-development-of-the-next-ai-strategy.html",
         "https://www.canada.ca/en/government/system/digital-government/digital-government-innovations/guide-departmental-ai-responsibilities.html",
         "https://ised-isde.canada.ca/site/ised/en/enabling-large-scale-sovereign-ai-data-centres",
+        "https://open.canada.ca/data/en/dataset/fcbc0200-79ba-4fa4-94a6-00e32facea6b",
         # Policy Horizons Canada (foresight & AI futures)
         "https://horizons.service.canada.ca/en/2025/02/10/ai-policy-consideration/index.shtml",
         # Health Canada
@@ -149,6 +202,8 @@ JURISDICTION_SOURCES = {
         "https://www.ipc.on.ca/en/media-centre/blog/artificial-intelligence-public-sector-building-trust-now-and-future",
         "https://www.ontario.ca/page/strengthening-cyber-security-and-building-trust-public-sector",
         "https://www.ontario.ca/page/digital-ontario",
+        "https://www.ola.org/sites/default/files/node-files/bill/document/pdf/2024/2024-11/b194rep_e.pdf",
+        "https://www.ola.org/en/legislative-business/bills/parliament-43/session-1/bill-194?utm_campaign=%2Fen%2Frelease%2F1007160%2Fontario-updating-cyber-security-privacy-and-access-framework-to-align-more-closely-with-jurisdictions-across-canada&utm_medium=email&utm_source=newsroom",
     ],
     "Alberta": [
         "https://www.alberta.ca/technology-and-innovation",
@@ -252,32 +307,46 @@ def fetch_text_from_url(url: str) -> str:
 
     content_type = resp.headers.get("Content-Type", "").lower()
 
-    # PDF handling
+    # PDF handling (collision-safe for multi-user Streamlit deployment)
     if "pdf" in content_type or url.lower().endswith(".pdf"):
-        tmp_path = "tmp_policy.pdf"
-        with open(tmp_path, "wb") as f:
-            f.write(resp.content)
 
-        pages_text = []
-        
+        tmp_path = None  # Track temp file path so we can safely clean up
+
         try:
-           with pdfplumber.open(tmp_path) as pdf:
-               for page in pdf.pages:
-                   t = page.extract_text() or ""
-                   if t.strip():
-                       pages_text.append(t)
+            # Create a unique temporary file per request to avoid filename collisions
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(resp.content)
+                tmp_path = tmp.name
+
+            pages_text = []
+
+            # Use existing pdfplumber logic
+            with pdfplumber.open(tmp_path) as pdf:
+                for page in pdf.pages:
+                    try:
+                        t = page.extract_text() or ""
+                        if t.strip():
+                            pages_text.append(t.strip())
+                    except Exception:
+                        # Skip problematic pages instead of failing entire document
+                        continue
+
+            if not pages_text:
+                print(f"[fetch_text_from_url] No text extracted from PDF {url}")
+
+            return "\n".join(pages_text)
+
         except Exception as e:
             print(f"[fetch_text_from_url] Error reading PDF {url}: {e}")
+            return ""
+
         finally:
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-
-        if not pages_text:
-            print(f"[fetch_text_from_url] No text extracted from PDF {url}")
-
-        return "\n".join(pages_text)
+            # Always attempt to delete temp file
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
 
     # HTML handling
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -297,7 +366,7 @@ def fetch_text_from_url(url: str) -> str:
 
 # ---- 3. CORPUS BUILDER (with normalization + caching) ----
 
-# Cache so we only fetch each jurisdiction once per run
+# Cache to only fetch each jurisdiction once per run
 _jurisdiction_corpus_cache: dict[str, str] = {}
 
 def get_jurisdiction_corpus(jurisdiction: str) -> str:
@@ -411,7 +480,12 @@ def answer_ai_policy_question(jurisdiction: str, question: str) -> str:
     # Limit INPUT size sent to the model (character-based cap on the corpus excerpt)
     max_chars = 50000  # increase as corpus grows (esp. federal)
     trimmed_corpus = trim_corpus_keep_head_tail(corpus, max_chars)
-
+    
+    # Build a list of official source URLs for this jurisdiction for the "Where to read more" section
+    urls = JURISDICTION_SOURCES.get(canonical, [])
+    sources_block = "\n".join(
+        f"- Source {i+1}: {url}" for i, url in enumerate(urls)
+)
     system_prompt = (
         "You are an expert assistant that summarizes and explains Canadian government "
         "AI policies, directives, and frameworks in plain, non-legal language.\n"
@@ -425,10 +499,18 @@ The user is asking about AI policy for the **{canonical}** government in Canada.
 **User question:**  
 {question}
 
+Official source URLs for this jurisdiction:
+{sources_block}
+
 Below are excerpts from official policy/framework pages for this jurisdiction:
 \"\"\"{trimmed_corpus}\"\"\"
 
 ### Instructions for your answer:
+
+Prioritize formal policies, directives, mandatory frameworks, and operational guidance that currently govern or shape AI use in this jurisdiction. Give less emphasis to general commentary, background discussion, or foresight material unless it directly helps explain the policy context.
+
+If multiple types of sources are present, structure the answer so that binding or operational requirements are explained first, followed by supporting context.
+
 - Begin with 2–4 short paragraphs that provide a clear, professional narrative response to the user’s question.
 - Explain the government’s AI-related policies, directives, frameworks, or guidance, and describe what they mean in practice for:
   (a) public-sector organizations, and 
@@ -436,7 +518,12 @@ Below are excerpts from official policy/framework pages for this jurisdiction:
 - Base all statements strictly on the excerpts provided. If the corpus does not address something the user asked about, state this clearly instead of guessing.
 - After the narrative, include a section titled **"Key points"** with 3–6 bullet points summarizing the most important ideas.
 - Include a section titled **"What this means in practice"** with one short paragraph and optional bullet points describing practical implications (e.g., transparency expectations, risk assessment duties, procurement considerations, disclosure rules).
-- End with a section titled **"Where to read more"** listing the main policies, directives, or strategy documents referenced (use bullet points).
+
+- End with a section titled **"Where to read more"** listing the 3–6 most relevant sources from the "Official source URLs for this jurisdiction" section above. For each item, include:
+    - the document or page title, and  
+    - the full URL (copied exactly from one of the sources listed in the "Official source URLs for this jurisdiction" section above)
+
+Do not omit URLs. Do not invent or modify links. Only use URLs from the list provided.
 """
    
     response = client.chat.completions.create(
