@@ -1,5 +1,7 @@
 # canadian-ai-policy_explorer.py 
 
+from __future__ import annotations
+
 import os
 import requests
 import pdfplumber
@@ -11,6 +13,8 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 # Safe temporary file handling (avoids filename collisions in multi-user Streamlit)
 import tempfile
+import json
+from typing import Any
 
 # ---- Helper function for Streamlit User Interface (UI) for single goverment response ----
 def set_single_question(q: str):
@@ -50,6 +54,40 @@ def trim_corpus_keep_head_tail(corpus: str, max_chars: int) -> str:
     head = corpus[:half]
     tail = corpus[-half:]
     return head + "\n\n...[content omitted for length]...\n\n" + tail
+
+# ---- Helper: Extract referenced source URLs from model output (for "Where to read more") ----
+def _parse_referenced_urls_from_model(output: str) -> list[str]:
+    """
+    Extract a JSON object with {"referenced_urls": [...]} from model text.
+    If parsing fails, return empty list.
+    """
+    # Prefer last JSON object in response text (after narrative)
+    idx = output.rfind("{")
+    if idx == -1:
+        return []
+
+    candidate = output[idx:]
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError:
+        # fallback: attempt to isolate where 'referenced_urls' appears
+        start = output.find('"referenced_urls"')
+        if start == -1:
+            return []
+        left = output.rfind("{", 0, start)
+        right = output.find("}", start)
+        if left == -1 or right == -1:
+            return []
+        try:
+            payload = json.loads(output[left:right + 1])
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(payload, dict):
+        return []
+    urls = payload.get("referenced_urls") or payload.get("references") or []
+    if not isinstance(urls, list):
+        return []
+    return [str(u).strip() for u in urls if isinstance(u, str) and u.strip()]
 
 # ---- Helper function to fetch multiple URLs in parallel ----
 def fetch_all_text_parallel(urls: list[str], max_workers: int = 6) -> list[str]:
@@ -175,109 +213,433 @@ def is_non_canadian_question(question: str) -> bool:
 # ---- 1. JURISDICTION SOURCES ----
 JURISDICTION_SOURCES = {
     "Federal": [
-        "https://www.canada.ca/en/government/system/digital-government/digital-government-innovations/responsible-use-ai.html",
-        "https://www.canada.ca/en/government/system/digital-government/digital-government-innovations/responsible-use-ai/guide-use-generative-ai.html",
-        "https://www.canada.ca/en/government/system/digital-government/digital-government-innovations/responsible-use-ai/guide-scope-directive-automated-decision-making.html",
-        "https://www.canada.ca/en/government/system/digital-government/digital-government-innovations/responsible-use-ai/gc-ai-strategy-overview.html",
-        "https://www.canada.ca/en/government/system/digital-government/digital-government-innovations/responsible-use-ai/principles.html",
-        "https://open.canada.ca/data/en/dataset/fcbc0200-79ba-4fa4-94a6-00e32facea6b",
-        "https://www.canada.ca/en/innovation-science-economic-development/news/2025/09/government-of-canada-launches-ai-strategy-task-force-and-public-engagement-on-the-development-of-the-next-ai-strategy.html",
-        "https://www.canada.ca/en/government/system/digital-government/digital-government-innovations/guide-departmental-ai-responsibilities.html",
-        "https://ised-isde.canada.ca/site/ised/en/enabling-large-scale-sovereign-ai-data-centres",
-        "https://open.canada.ca/data/en/dataset/fcbc0200-79ba-4fa4-94a6-00e32facea6b",
-        # Policy Horizons Canada (foresight & AI futures)
-        "https://horizons.service.canada.ca/en/2025/02/10/ai-policy-consideration/index.shtml",
-        # Health Canada
-        "https://www.canada.ca/en/health-canada/corporate/transparency/health-agreements/pan-canadian-ai-guiding-principles.html",
-        # Office of the Privacy Commissioner of Canada
-        "https://www.priv.gc.ca/en/privacy-topics/technology/artificial-intelligence/gd_principles_ai/",
-        # Canadian Judicial Council
-        "https://cjc-ccm.ca/sites/default/files/documents/2024/AI%20Guidelines%20-%20FINAL%20-%202024-09%20-%20EN.pdf",
+    {
+        "title": "Responsible use of AI in government (Directive on Automated Decision-making)",
+        "url": "https://www.canada.ca/en/government/system/digital-government/digital-government-innovations/responsible-use-ai.html",
+        "type": "guidance",
+        "date": "2026-03-31"
+    },
+    {
+        "title": "Guide to Using Generative AI",
+        "url": "https://www.canada.ca/en/government/system/digital-government/digital-government-innovations/responsible-use-ai/guide-use-generative-ai.html",
+        "type": "guidance",
+        "date": "2025-06-03"
+    },
+    {
+        "title": "Guide on the Scope of the Directive on Automated Decision-Making",
+        "url": "https://www.canada.ca/en/government/system/digital-government/digital-government-innovations/responsible-use-ai/guide-scope-directive-automated-decision-making.html",
+        "type": "guidance",
+        "date": "2025-06-24"
+    },
+    {
+        "title": "AI Strategy for the Federal Public Service 2025-2027: Overview",
+        "url": "https://www.canada.ca/en/government/system/digital-government/digital-government-innovations/responsible-use-ai/gc-ai-strategy-overview.html",
+        "type": "strategy",
+        "date": "2026-02-25"
+    },
+    {
+        "title": "Guiding Principles for the use of AI in Government",
+        "url": "https://www.canada.ca/en/government/system/digital-government/digital-government-innovations/responsible-use-ai/principles.html",
+        "type": "guidance",
+        "date": "2024-05-30"
+
+    },
+    {
+        "title": "Government of Canada AI Register",
+        "url": "https://open.canada.ca/data/en/dataset/fcbc0200-79ba-4fa4-94a6-00e32facea6b",
+        "type": "guidance",
+        "date": "2025-11-28"
+    },
+    {
+        "title": "Government of Canada AI Strategy Task Force and Public Engagement on the Next AI Strategy",
+        "url": "https://www.canada.ca/en/innovation-science-economic-development/news/2025/09/government-of-canada-launches-ai-strategy-task-force-and-public-engagement-on-the-development-of-the-next-ai-strategy.html",
+        "type": "news_release",
+        "date": "2025-09-26"
+    },
+    {
+        "title": "Guide on Departmental AI Responsibilities",
+        "url": "https://www.canada.ca/en/government/system/digital-government/digital-government-innovations/guide-departmental-ai-responsibilities.html",
+        "type": "guidance",
+        "date": "2026-02-06"
+    },
+    {
+        "title": "Enabling Large-Scale Sovereign AI Data Centres (Call for Proposals)",
+        "url": "https://ised-isde.canada.ca/site/ised/en/enabling-large-scale-sovereign-ai-data-centres",
+        "type": "strategy",
+        "date": "2026-02-16"
+    },
+    {
+        "title": "Foresight on AI: Policy considerations (Policy Horizons Canada)",
+        "url": "https://horizons.service.canada.ca/en/2025/02/10/ai-policy-consideration/pdf/foresight_on_ai_policy_considerations.pdf",
+        "type": "report",
+        "date": "2025"
+    },
+    {
+        "title": "Pan-Canadian AI for Health Guiding Principles (Health Canada)",
+        "url": "https://www.canada.ca/en/health-canada/corporate/transparency/health-agreements/pan-canadian-ai-guiding-principles.html",
+        "type": "guidance",
+        "date": "2025-01-30"
+    },
+    {
+        "title": "Principles for Responsible and Trustworthy Generative AI Technologies (Privavcy Commissioner of Canada)",
+        "url": "https://www.priv.gc.ca/en/privacy-topics/technology/artificial-intelligence/gd_principles_ai/",
+        "type": "guidance",
+        "date": "2023-12-07"
+    },
+    {
+        "title": "Guidelines for the Use of AI in Canadian Courts (Canadian Judicial Council)",
+        "url": "https://cjc-ccm.ca/sites/default/files/documents/2024/AI%20Guidelines%20-%20FINAL%20-%202024-09%20-%20EN.pdf",
+        "type": "guidance",
+        "date": "2024-09"
+    },
+    {
+        "title": "Artificial Intelligence in Court Operations (Federal Judicial Affairs Canada)",
+        "url": "https://www.fja.gc.ca/COVID-19/Artificial-Intelligence-Intelligence-artificielle-eng.html",
+        "type": "guidance",
+        "date": "None"
+}
     ],
 
     "Ontario": [
-        "https://www.ontario.ca/page/ontarios-trustworthy-artificial-intelligence-ai-framework",
-        "https://www.ontario.ca/page/responsible-use-artificial-intelligence-directive",
-        "https://www.ontario.ca/page/ontario-broader-public-sector-cyber-security-strategy-report",
-        "https://www.ipc.on.ca/en/media-centre/blog/artificial-intelligence-public-sector-building-trust-now-and-future",
-        "https://www.ontario.ca/page/strengthening-cyber-security-and-building-trust-public-sector",
-        "https://www.ontario.ca/page/digital-ontario",
-        "https://www.ola.org/sites/default/files/node-files/bill/document/pdf/2024/2024-11/b194rep_e.pdf",
-        "https://www.ola.org/en/legislative-business/bills/parliament-43/session-1/bill-194?utm_campaign=%2Fen%2Frelease%2F1007160%2Fontario-updating-cyber-security-privacy-and-access-framework-to-align-more-closely-with-jurisdictions-across-canada&utm_medium=email&utm_source=newsroom",
-    ],
+    {
+        "title": "Ontario’s Trustworthy Artificial Intelligence Framework",
+        "url": "https://www.ontario.ca/page/ontarios-trustworthy-artificial-intelligence-ai-framework",
+        "type": "strategy",
+        "date": "2025-12-01"
+    },
+    {
+        "title": "Responsible Use of Artificial Intelligence Directive",
+        "url": "https://www.ontario.ca/page/responsible-use-artificial-intelligence-directive",
+        "type": "policy",
+        "date": "2026-01-07"
+    },
+    {
+        "title": "Ontario Broader Public Sector Cyber Security Strategy Report",
+        "url": "https://www.ontario.ca/page/ontario-broader-public-sector-cyber-security-strategy-report",
+        "type": "report",
+        "date": "2026-02-11"
+    },
+    {
+        "title": "Artificial Intelligence in the Public Sector: Building Trust Now and for the Future",
+        "url": "https://www.ipc.on.ca/en/media-centre/blog/artificial-intelligence-public-sector-building-trust-now-and-future",
+        "type": "guidance",
+        "date": "2024-02-01"
+    },
+    {
+        "title": "Strengthening Cyber Security and Building Trust in the Public Sector",
+        "url": "https://www.ontario.ca/page/strengthening-cyber-security-and-building-trust-public-sector",
+        "type": "guidance",
+        "date": "2026-02-11"
+    },
+    {
+        "title": "Digital Ontario",
+        "url": "https://www.ontario.ca/page/digital-ontario",
+        "type": "guidance",
+        "date": "2026-02-11"
+    },
+    {
+        "title": "Bill 194: An Act to enact the Digital Security and Trust Act, 2024",
+        "url": "https://www.ola.org/sites/default/files/node-files/bill/document/pdf/2024/2024-11/b194rep_e.pdf",
+        "type": "policy",
+        "date": "2024-11"
+    },
+    {
+        "title": "Bill 194, Strengthening Cyber Security and Building Trust in the Public Sector Act, 2024",
+        "url": "https://www.ola.org/en/legislative-business/bills/parliament-43/session-1/bill-194",
+        "type": "policy",
+        "date": "2024"
+    },
+    {   "title": "Employment Standards Act – AI Disclosure Requirement for Job Postings",
+        "url": "https://www.ontario.ca/laws/statute/00e41#BK16",
+        "type": "policy",
+        "date": "2026-01-01"
+    }
+],
     "Alberta": [
-        "https://www.alberta.ca/technology-and-innovation",
-        "https://www.alberta.ca/artificial-intelligence-data-centres-strategy",
-        "https://open.alberta.ca/publications/albertas-ai-data-centre-strategy",
-        "https://www.alberta.ca/system/files/popa-fact-sheet-ai-automated-systems.pdf",
-        "https://www.alberta.ca/lookup/imt-policy-instruments-portal.aspx",
-    ],
+    {
+        "title": "Alberta's AI Lab GovLab.ai",
+        "url": "https://www.alberta.ca/albertas-artificial-intelligence-lab-govlab-ai",
+        "type": "strategy",
+        "date": "None"
+
+    },
+    {
+        "title": "Mandate Letter: Minister of Technology and Innovation (Alberta)",
+        "url": "https://open.alberta.ca/dataset/b0769b96-7a45-40b5-b57c-415ff82aca49/resource/fd1200fb-daab-47cf-95d4-94c22b73acb8/download/ti-mandate-letter-technology-and-innovation-2025.pdf",
+        "type": "policy",
+        "date": "2025-10-16"
+    },
+    {
+        "title": "Alberta Artificial Intelligence Data Centres Strategy",
+        "url": "https://www.alberta.ca/artificial-intelligence-data-centres-strategy",
+        "type": "strategy",
+        "date": "None"
+    },
+    {
+        "title": "Alberta’s AI Data Centre Strategy",
+        "url": "https://open.alberta.ca/dataset/f6fe5816-12ac-4ba6-805c-d0a0dd5aebf9/resource/26d62103-ff38-4310-a98f-ab4595a4af74/download/ti-albertas-ai-data-centre-strategy.pdf",
+        "type": "strategy",
+        "date": "2024-12"
+    },
+    {
+        "title": "Fact Sheet: Artificial Intelligence and Automated Systems",
+        "url": "https://www.alberta.ca/system/files/popa-fact-sheet-ai-automated-systems.pdf",
+        "type": "guidance",
+        "date": "2025-06-6"
+    },
+    {
+        "title": "Artificial Intelligence Usage Policy",
+        "url": "https://manuals.alberta.ca/media/i5mjqsgw/artificial-intelligence-usage-policy.pdf",
+        "type": "policy",
+        "date": "2025-05-1"
+    },
+    {
+        "title": "Alberta Technology and Innovation Strategy",
+        "url": "https://open.alberta.ca/dataset/60b678e2-76d6-4231-a76b-914270ed1a3f/resource/955cd7da-a537-4c6f-a815-cb759d47d8fc/download/jei-alberta-technology-and-innovation-strategy-2022.pdf",
+        "type": "strategy",
+        "date": "2022-04-12"
+    }
+],
    "British Columbia": [
-        "https://digital.gov.bc.ca/policies-standards/generative-ai-policy",
-        "https://digital.gov.bc.ca/ai/draft-responsible-use-principles",
-        "https://www2.gov.bc.ca/assets/gov/education/administration/kindergarten-to-grade-12/ai-in-education/considerations-for-using-ai-tools-in-k-12-schools.pdf",
-    ],
+    {
+        "title": "Policy on the Use of Generative AI (BC Government)",
+        "url": "https://digital.gov.bc.ca/policies-standards/generative-ai-policy",
+        "type": "policy",
+        "date": "2025-05-9"
+
+    },
+    {
+        "title": "Responsible Use of AI – Draft Principles (BC Government)",
+        "url": "https://digital.gov.bc.ca/ai/draft-responsible-use-principles",
+        "type": "guidance",
+        "date": "2024-11-26"
+
+    },
+    {
+        "title": "Considerations for Using AI Tools in K–12 Schools (BC Government)",
+        "url": "https://www2.gov.bc.ca/assets/gov/education/administration/kindergarten-to-grade-12/ai-in-education/considerations-for-using-ai-tools-in-k-12-schools.pdf",
+        "type": "guidance",
+        "date": "None"
+
+    },
+    {
+        "title": "Digital Literacy and the use of AI in Education: Supports for British Columbia Schools",
+        "url": "https://www2.gov.bc.ca/gov/content/education-training/k-12/administration/program-management/ai-in-education?",
+        "type": "guidance",
+        "date": "2024-07-18"
+
+    },
+    {
+        "title": "Call for Strengthened Regulation and Oversight of AI in Public Sector Decision-making",
+        "url": "https://www.oipc.bc.ca/documents/news-releases/2396",
+        "type": "news_release",
+        "date": "2021-06-17"
+    },
+
+    # Optional but strong governance layer
+    {
+        "title": "Digital Code of Practice (BC Government)",
+        "url": "https://digital.gov.bc.ca/policies-standards/dcop/",
+        "type": "guidance",
+        "date": "None"
+    }
+],
 
     "Québec": [
-        "https://cdn-contenu.quebec.ca/cdn-contenu/adm/min/economie/publications-adm/politique/PO_SQRI2_2022-2027_MEI_EN.pdf",
-        "https://cdn-contenu.quebec.ca/cdn-contenu/education/Numerique/continuum-cadre-reference-num-VA.pdf",
-        "https://cdn-contenu.quebec.ca/cdn-contenu/adm/min/finances/publications-adm/Budget/2526/Budget2526_InnovatingToProsper.pdf",
-        "https://cdn-contenu.quebec.ca/cdn-contenu/adm/min/finances/publications-adm/Budget/2526/Budget2526_AdditionalInfo.pdf",
-        "https://cdn-contenu.quebec.ca/cdn-contenu/adm/min/finances/publications-adm/Mise_a_jour_economique/2023/AUTEN_FasciculeUpdateNov2023.pdf",
-        "https://api.forum-ia.devbeet.com/app/uploads/2020/09/ai-strategy_en-acj-19-juin-v8.pdf?utm_source=chatgpt.com", 
-    ],
+    {
+        "title": "The 2022-2027 Quebec Research and Innovation Investment Strategy",
+        "url": "https://cdn-contenu.quebec.ca/cdn-contenu/adm/min/economie/publications-adm/politique/PO_SQRI2_2022-2027_MEI_EN.pdf",
+        "type": "strategy",
+        "date": "2022-09-2022"
+    },
+    {
+        "title": "Digital Competency Framework (Education and AI Context)",
+        "url": "https://cdn-contenu.quebec.ca/cdn-contenu/education/Numerique/continuum-cadre-reference_num_va.pdf",
+        "type": "strategy",
+        "date": "None"
+    },
+    {
+        "title": "Budget 2025–2026 – For a Strong Quebec",
+        "url": "https://cdn-contenu.quebec.ca/cdn-contenu/adm/min/finances/publications-adm/Budget/2526/Budget2526_InnovatingToProsper.pdf",
+        "type": "strategy",
+        "date": "2025-03"
+    }
+],   
 
     "Nova Scotia": [
-        "https://www.novascotia.ca/digital-code-practice",
-        "https://www.novascotia.ca/government/cyber-security-and-digital-solutions",
-    ],
-
+    {
+        "title": "Digital Code of Practice (Government of Nova Scotia)",
+        "url": "https://www.novascotia.ca/digital-code-practice",
+        "type": "guidance",
+        "date": "None"
+    },
+    {
+        "title": "Use of Artificial Intelligence in Court Proceedings (Nova Scotia Courts)",
+        "url": "https://www.courts.ns.ca/resources/notices/use-of-artificial-intelligence-ai-proceedings-nova-scotia-court-of-appeal",
+        "type": "guidance",
+        "date": "2025-03-14"
+    }
+],
+ 
     "New Brunswick": [
-        "https://www.gnb.ca/nosearch/digital-numerique/digital_new_brunswick.pdf",
-    ],
+    {
+        "title": "Digital New Brunswick Strategy",
+        "url": "https://www.gnb.ca/nosearch/digital-numerique/digital_new_brunswick.pdf",
+        "type": "strategy",
+        "date": "None"
+    }
+],  
 
     "Manitoba": [
-        "https://www.gov.mb.ca/asset_library/en/proactive/20252026/innovation-and-prosperity-report.pdf",
-        "https://news.gov.mb.ca/news/index.html?item=71303",
-        "https://news.gov.mb.ca/news/?item=68018",
-    ],
+    {
+        "title": "Innovation and Prosperity Report (Government of Manitoba)",
+        "url": "https://www.gov.mb.ca/asset_library/en/proactive/20252026/innovation-and-prosperity-report.pdf",
+        "type": "report",
+        "date": "2025-10"
+    },
+    {
+        "title": "Manitoba Government Receives Report on Future of Technology, Innovation and Productivity",
+        "url": "https://news.gov.mb.ca/news/index.html?item=71303",
+        "type": "news_release",
+        "date": "2025-10-31"
+    },
+    {
+        "title": "Manitoba Government Invests in AI For Small And Medium-Sized Businesses",
+        "url": "https://news.gov.mb.ca/news/?item=68018",
+        "type": "news_release",
+        "date": "2025-03-21"
+    }
+],
 
     "Saskatchewan": [
-        "https://www.saskatchewan.ca/government/news-and-media/2024/june/07/saskatchewan-advocates-for-federal-ai-voice-cloning-restrictions",
-        "https://taskroom.saskatchewan.ca/services-and-support/information-technology/artificial-intelligence/generative-artificial-intelligence-guidelines",
-    ],
-   
+    {
+        "title": "Generative Artificial Intelligence Guidelines",
+        "url": "https://taskroom.saskatchewan.ca/services-and-support/information-technology/artificial-intelligence/generative-artificial-intelligence-guidelines",
+        "type": "guidance",
+        "date": "None",    
+    },
+    {
+        "title": "Guidelines for Government of Saskatchewan Employees in Using Generative AI",
+        "url": "file:///C:/Users/dwplu/Downloads/Artificial%20Intelligence%20Guidelines%20(13).pdf",
+        "type": "guidance",
+        "date": "None",    
+    },
+    {
+        "title": "User Acceptable Use Policy (Government of Saskatchewan)",
+        "url": "file:///C:/Users/dwplu/Downloads/User%20Acceptable%20Usage%20Policy%20(1).pdf",
+        "type": "policy",
+        "date": "2026-02-17"
+
+    }
+],
+
     "Prince Edward Island": [
-        "https://www.princeedwardisland.ca/sites/default/files/ad9e/MD2025-06ENG.pdf",
-        "https://www.princeedwardisland.ca/sites/default/files/publications/pei_digital_health_strategy.pdf",
-        "https://www.princeedwardisland.ca/sites/default/files/publications/2021_speech_from_the_throne.pdf",
-        "https://www.princeedwardisland.ca/sites/default/files/3089/Health_PEI_Strategic_Plan_2025-2028.pdf",
-    ],
-
+    {
+        "title": "Responsible Use of Communication and Information Technology)",
+        "url": "https://www.princeedwardisland.ca/sites/default/files/ad9e/MD2025-06ENG.pdf",
+        "type": "policy",
+        "date": "2025-07-17"
+    }
+],
+   
     "Yukon": [
-        "https://yukon.ca/en/education-and-schools/kindergarten-grade-12-curriculum/learn-about-use-artificial-intelligence-ai",
+    {
+        "title": "Learn about the use of AI in education",
+        "url": "https://yukon.ca/en/education-and-schools/kindergarten-grade-12-curriculum/learn-about-use-artificial-intelligence-ai",
+        "type": "guidance",
+        "date": "2024-12-02"
+    },
+    {
+        "title": "Getting Ahead of the Curve: AI, Privacy and Fairness in the Public Sector (BC & Yukon Ombudsperson and Privacy Commissioner Report)",
+        "url": "https://bcombudsperson.ca/wp-content/uploads/2025/07/OMB-GettingAheadoftheCurve-v6.pdf",
+        "type": "report",
+        "date": "2021-06"
+    }
+],
 
-    ],
+    "Nunavut": [],
+    
 
-    "Nunavut":  [
-        "https://www.gov.nu.ca/en/culture-language-heritage-and-art/language-preservation-and-promotion-through-technology-ms",
-        "https://assembly.nu.ca/sites/default/files/2025-05/OGOPA%20Report%20-%20IPC%202023-2024%20-%20May2025%20-%20English.pdf",
-    ],
+    "Newfoundland and Labrador": [
+    {
+        "title": "Advancing Digital Government in Newfoundland and Labrador",
+        "url": "https://www.gov.nl.ca/releases/2025/gmsd-en/0723n01/",
+        "type": "news_release",
+        "date": "2025-07-23"
+    },
+    {
+        "title": "Provincial Government Invests in AI Training for Business",   
+        "url": "https://www.gov.nl.ca/releases/2025/ipgs/0507n03/",
+        "type": "news_release",
+        "date": "2025-05-07"
+    },
+    {
+        "title": "Canadian Privacy Regulators Launch Principles for the Responsible Use of Gen AI",
+        "url": "https://www.gov.nl.ca/releases/2023/oipc/1207n04/",
+        "type": "news_release",
+        "date": "2023-12-07"
+    },
+    {
+        "title": "Equipping Local Manufacturing Workforce with AI Training",
+        "url": "https://www.gov.nl.ca/releases/2025/ipgs/0416n04/",
+        "type": "news_release",
+        "date": "2025-04-16"
+    },
+    {
+        "title": "Premier Fury Announces Support for New Centre for AI",
+        "url": "https://www.gov.nl.ca/releases/2022/exec/0708n02/",
+        "type": "news_release",
+        "date": "2022-07-08"
+    }
+],
 
-    "Newfoundland and Labrador":  [
-        "https://www.gov.nl.ca/releases/2025/gmsd-en/0723n01/",
-        "https://www.gov.nl.ca/releases/2025/ipgs/0507n03/",
-        "https://www.gov.nl.ca/releases/2023/oipc/1207n04/",
-        "https://www.gov.nl.ca/releases/2025/ipgs/0416n04/",
-        "https://www.gov.nl.ca/releases/2022/exec/0708n02/",
-    ],
-
-    "Northwest Territories":  [
-        "https://bearnet.gov.nt.ca/sites/bearnet/files/2025-05-29_gnwt_guideline_on_use_of_generative_ai_-_signed.pdf",
-        "https://www.nwtgeoscience.ca/news/canada-and-northwest-territories-partner-innovative-ai-based-core-scanning-initiative-support",
-    ],
+    "Northwest Territories": [
+    {
+        "title": "Guideline on the Use of Generative Artificial Intelligence",
+        "url": "https://bearnet.gov.nt.ca/sites/bearnet/files/2025-05-29_gnwt_guideline_on_use_of_generative_ai_-_signed.pdf",
+        "type": "guidance",
+        "date": "2025-05-29"
+    }
+],
 
 }
+
+def _normalize_source_entry(entry):
+    if isinstance(entry, str):
+        return {"title": None, "url": entry.strip()}
+    if isinstance(entry, dict):
+        url = entry.get("url") or entry.get("link") or entry.get("href")
+        if not url:
+            raise ValueError("Source entry requires a URL")
+        return {"title": entry.get("title"), "url": url.strip()}
+    raise TypeError("Source entry must be a string URL or a dict with url")
+def normalize_jurisdiction_sources(sources: dict[str, list]) -> dict[str, list[dict]]:
+    normalized = {}
+    for jurisdiction, entries in sources.items():
+        normalized[jurisdiction] = [_normalize_source_entry(e) for e in entries]
+    return normalized
+
+NORMALIZED_JURISDICTION_SOURCES = normalize_jurisdiction_sources(JURISDICTION_SOURCES)
+
+def get_source_entries(jurisdiction: str) -> list[dict]:
+    canonical = NORM_KEYS.get(jurisdiction.lower())
+    if canonical is None:
+        return []
+    return NORMALIZED_JURISDICTION_SOURCES.get(canonical, [])
+
+def get_source_urls(jurisdiction: str) -> list[str]:
+    return [entry["url"] for entry in get_source_entries(jurisdiction)]
+
+def where_to_read_more_text(jurisdiction: str) -> str:
+    entries = get_source_entries(jurisdiction)
+    if not entries:
+        return "Where to read more: No sources configured for this jurisdiction."
+
+    lines = ["Where to read more:"]
+    for entry in entries:
+        label = entry["title"] or entry["url"]
+        lines.append(f"- {label} ({entry['url']})")
+    return "\n".join(lines)
 
 # Normalize lookups so internal logic can safely use lowercase keys
 NORM_KEYS = {k.lower(): k for k in JURISDICTION_SOURCES.keys()}
@@ -389,7 +751,8 @@ def get_jurisdiction_corpus(jurisdiction: str) -> str:
     if canonical in _jurisdiction_corpus_cache:
         return _jurisdiction_corpus_cache[canonical]
 
-    urls = JURISDICTION_SOURCES.get(canonical, [])
+    # Helper to get URLs (supports structured and legacy entries)
+    urls = get_source_urls(canonical)
     # Thin jurisdictions: no URLs yet -> empty corpus (handled by callers)
     if not urls:
         _jurisdiction_corpus_cache[canonical] = ""
@@ -433,7 +796,7 @@ def answer_ai_policy_question(jurisdiction: str, question: str) -> str:
 
     # Fetch or build the corpus
     corpus = get_jurisdiction_corpus(canonical)
-    urls = JURISDICTION_SOURCES.get(canonical, [])
+    urls = get_source_urls(canonical)
 
     # Case 1: thin jurisdiction (no URLs configured)
     if not urls:
@@ -481,11 +844,10 @@ def answer_ai_policy_question(jurisdiction: str, question: str) -> str:
     max_chars = 50000  # increase as corpus grows (esp. federal)
     trimmed_corpus = trim_corpus_keep_head_tail(corpus, max_chars)
     
-    # Build a list of official source URLs for this jurisdiction for the "Where to read more" section
-    urls = JURISDICTION_SOURCES.get(canonical, [])
-    sources_block = "\n".join(
-        f"- Source {i+1}: {url}" for i, url in enumerate(urls)
-)
+    # Build sources block for model (URLs only, no titles for pairing)
+    urls = get_source_urls(canonical)
+    sources_block = "\n".join(f"- {url}" for url in urls)
+        
     system_prompt = (
         "You are an expert assistant that summarizes and explains Canadian government "
         "AI policies, directives, and frameworks in plain, non-legal language.\n"
@@ -518,14 +880,21 @@ If multiple types of sources are present, structure the answer so that binding o
 - Base all statements strictly on the excerpts provided. If the corpus does not address something the user asked about, state this clearly instead of guessing.
 - After the narrative, include a section titled **"Key points"** with 3–6 bullet points summarizing the most important ideas.
 - Include a section titled **"What this means in practice"** with one short paragraph and optional bullet points describing practical implications (e.g., transparency expectations, risk assessment duties, procurement considerations, disclosure rules).
+- Do not include any points outside the provided excerpts.
+- At the end, append a machine-readable JSON object with only quoted URLs from the curated list:
+  {{
+    "referenced_urls": [
+      "https://... (must be one of the above official source URLs from this jurisdiction)",
+      ...
+    ]
+  }}
 
-- End with a section titled **"Where to read more"** listing the 3–6 most relevant sources from the "Official source URLs for this jurisdiction" section above. For each item, include:
-    - the document or page title, and  
-    - the full URL (copied exactly from one of the sources listed in the "Official source URLs for this jurisdiction" section above)
+Example valid end block:
 
-Do not omit URLs. Do not invent or modify links. Only use URLs from the list provided.
+### Metadata
+{{"referenced_urls": ["https://www.canada.ca/en/government/system/digital-government/digital-government-innovations/responsible-use-ai.html"]}}
+
 """
-   
     response = client.chat.completions.create(
         model="gpt-4.1-mini",
         messages=[
@@ -536,8 +905,36 @@ Do not omit URLs. Do not invent or modify links. Only use URLs from the list pro
         max_tokens=1200,  # cap output length (completion tokens)
     )
 
-    return response.choices[0].message.content
+    # Extract model response, parse referenced URLs, and build filtered "Where to read more"
+    raw = response.choices[0].message.content or ""
+    referenced_urls = _parse_referenced_urls_from_model(raw)
 
+    # Filter against curated source list for this jurisdiction
+    source_entries = get_source_entries(canonical)
+    allowed_urls = {entry["url"] for entry in source_entries}
+    final_urls = [u for u in referenced_urls if u in allowed_urls]
+
+    # Build deterministic "Where to read more" from validated matches only
+    if final_urls:
+        lines = ["Where to read more:"]
+        sources_by_url = {entry["url"]: entry for entry in source_entries}
+        for u in final_urls:
+            entry = sources_by_url.get(u)
+            title = (entry.get("title") if entry else None) or u
+            lines.append(f"- {title} ({u})")
+        where_text = "\n".join(lines)
+    else:
+        where_text = "Where to read more: See the Information sources section for official sources."
+
+    # Strip metadata block from displayed narrative
+    marker = "### Metadata"
+    if marker in raw:
+        narrative = raw.split(marker, 1)[0].strip()
+    else:
+        narrative = raw.strip()
+
+    return f"{narrative}\n\n{where_text}"
+  
 # ---- 5. TWO-GOVERNMENT COMPARISON (normalized + thin-aware) ----
 def compare_jurisdictions(j1: str, j2: str, question: str | None = None) -> str:
     """
@@ -681,7 +1078,7 @@ def answer_canada_wide(question: str) -> str:
     corpora = []
     sources_used = []
 
-    for j in JURISDICTION_SOURCES.keys():
+    for j in NORMALIZED_JURISDICTION_SOURCES.keys():
         canonical = j  # already capitalized in our updated list
         corpus = get_jurisdiction_corpus(canonical)
 
@@ -733,9 +1130,20 @@ Below are excerpts from curated federal, provincial, and territorial AI policy o
   (b) other organizations (e.g., vendors, partners, nonprofits) that operate across multiple jurisdictions in Canada.
 - After the narrative, add a brief section titled **"Key Canada-wide themes"** with 3–7 bullet points summarizing the main cross-jurisdictional ideas.
 - Include a section titled **"What this means in practice (Canada-wide)"** with one short paragraph and bullet points describing concrete implications for organizations (such as transparency expectations, disclosure practices, procurement and vendor requirements, and AI risk-management approaches).
-- End with a section titled **"Where to read more"** listing, in bullet points, the main jurisdictions and/or types of documents you are drawing on (e.g., federal directives, provincial strategies).
-- Do NOT guess about jurisdictions that have no corpus content — acknowledge any gaps clearly if they are relevant to the question.
+- At the end, append a machine-readable JSON object with only quoted URLs from the curated list:
+  {{
+    "referenced_urls": [
+      "https://... (must be one of the official source URLs from the curated list across all jurisdictions)",
+      ...
+    ]
+  }}
+
+Example valid end block:
+
+### Metadata
+{{"referenced_urls": ["https://www.canada.ca/en/government/system/digital-government/digital-government-innovations/responsible-use-ai.html"]}}
 """
+    
     response = client.chat.completions.create(
         model="gpt-4.1-mini",
         messages=[
@@ -746,7 +1154,37 @@ Below are excerpts from curated federal, provincial, and territorial AI policy o
         max_tokens=1200,  # cap output length (completion tokens)
     )
 
-    return response.choices[0].message.content
+    # Extract model response, parse referenced URLs, and build filtered "Where to read more"
+    raw = response.choices[0].message.content or ""
+    referenced_urls = _parse_referenced_urls_from_model(raw)
+
+    # Filter against all curated sources across jurisdictions
+    all_source_entries = []
+    for entries in NORMALIZED_JURISDICTION_SOURCES.values():
+        all_source_entries.extend(entries)
+    allowed_urls = {entry["url"] for entry in all_source_entries}
+    final_urls = [u for u in referenced_urls if u in allowed_urls]
+
+    # Build deterministic "Where to read more" from validated matches only
+    if final_urls:
+        lines = ["Where to read more:"]
+        sources_by_url = {entry["url"]: entry for entry in all_source_entries}
+        for u in final_urls:
+            entry = sources_by_url.get(u)
+            title = (entry.get("title") if entry else None) or u
+            lines.append(f"- {title} ({u})")
+        where_text = "\n".join(lines)
+    else:
+        where_text = "Where to read more: See the Information sources section for official sources."
+
+    # Strip metadata block from displayed narrative
+    marker = "### Metadata"
+    if marker in raw:
+        narrative = raw.split(marker, 1)[0].strip()
+    else:
+        narrative = raw.strip()
+
+    return f"{narrative}\n\n{where_text}"
 
 # ---- 7. STREAMLIT UI ----
 st.set_page_config(
@@ -1212,17 +1650,20 @@ to public-sector AI governance. *See the notes at the bottom of this page for ad
 
     st.markdown("---")
 
-    for jurisdiction, urls in JURISDICTION_SOURCES.items():
+    for jurisdiction, entries in NORMALIZED_JURISDICTION_SOURCES.items():
         with st.expander(jurisdiction):
-            if urls:
+            if entries:
                 st.markdown("**Official sources used for this jurisdiction:**")
-                for url in urls:
-                    st.markdown(f"- [{url}]({url})")
+                for entry in entries:
+                    label = entry.get("title") or entry["url"]
+                    st.markdown(f"- [{label}]({entry['url']})")
             else:
                 st.info(
                     "No official AI policy or guidance sources are currently configured "
                     "for this jurisdiction yet."
                 )
+
+# ...existing code...
 
     # --- Notes on Information Sources ---
     st.markdown("---")
