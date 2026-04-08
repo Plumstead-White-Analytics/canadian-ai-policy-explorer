@@ -15,6 +15,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import tempfile
 import json
 from typing import Any
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import threading
+import time
 
 # ---- Helper function for Streamlit User Interface (UI) for single goverment response ----
 def set_single_question(q: str):
@@ -454,7 +458,7 @@ JURISDICTION_SOURCES = {
     },
     {
         "title": "Digital Competency Framework (Education and AI Context)",
-        "url": "https://cdn-contenu.quebec.ca/cdn-contenu/education/Numerique/continuum-cadre-reference_num_va.pdf",
+        "url": "https://cdn-contenu.quebec.ca/cdn-contenu/education/Numerique/continuum-cadre-reference-num-va.pdf",
         "type": "strategy",
         "date": "None"
     },
@@ -516,21 +520,10 @@ JURISDICTION_SOURCES = {
         "title": "Generative Artificial Intelligence Guidelines",
         "url": "https://taskroom.saskatchewan.ca/services-and-support/information-technology/artificial-intelligence/generative-artificial-intelligence-guidelines",
         "type": "guidance",
-        "date": "None",    
+        "date": "None",
     },
-    {
-        "title": "Guidelines for Government of Saskatchewan Employees in Using Generative AI",
-        "url": "file:///C:/Users/dwplu/Downloads/Artificial%20Intelligence%20Guidelines%20(13).pdf",
-        "type": "guidance",
-        "date": "None",    
-    },
-    {
-        "title": "User Acceptable Use Policy (Government of Saskatchewan)",
-        "url": "file:///C:/Users/dwplu/Downloads/User%20Acceptable%20Usage%20Policy%20(1).pdf",
-        "type": "policy",
-        "date": "2026-02-17"
-
-    }
+    # Other sources exist (e.g. guidelines for government employees and User Policy) but are downloads that are machine-specific
+    # and not fetchable in shared/deployed environments.
 ],
 
     "Prince Edward Island": [
@@ -604,15 +597,26 @@ JURISDICTION_SOURCES = {
 
 }
 
-def _normalize_source_entry(entry):
-    if isinstance(entry, str):
-        return {"title": None, "url": entry.strip()}
-    if isinstance(entry, dict):
-        url = entry.get("url") or entry.get("link") or entry.get("href")
-        if not url:
-            raise ValueError("Source entry requires a URL")
-        return {"title": entry.get("title"), "url": url.strip()}
-    raise TypeError("Source entry must be a string URL or a dict with url")
+def _normalize_source_entry(entry: dict) -> dict:
+    """
+    Significant: sources are now dict-only (no legacy string URLs).
+    Preserve all metadata fields while validating title/url.
+    """
+    if not isinstance(entry, dict):
+        raise TypeError("Source entry must be a dict with at least 'title' and 'url'")
+
+    url = (entry.get("url") or "").strip()
+    title = (entry.get("title") or "").strip()
+    if not url:
+        raise ValueError("Source entry requires a non-empty 'url'")
+    if not title:
+        raise ValueError("Source entry requires a non-empty 'title'")
+
+    normalized = dict(entry)  # preserve type/date/other metadata
+    normalized["url"] = url
+    normalized["title"] = title
+    return normalized
+
 def normalize_jurisdiction_sources(sources: dict[str, list]) -> dict[str, list[dict]]:
     normalized = {}
     for jurisdiction, entries in sources.items():
@@ -655,10 +659,38 @@ DEFAULT_HEADERS = {
     "Accept-Language": "en-CA,en;q=0.9",
 }
 
+DEFAULT_TIMEOUT = (4, 12)  # connect/read timeout in seconds
+
+RETRY_STRATEGY = Retry(
+    total=0,  # Significant: keep retries minimal for responsiveness
+    connect=0,
+    read=0,
+    status=0,
+    status_forcelist=[429, 500, 502, 503, 504],
+    backoff_factor=0.0,
+    allowed_methods=["GET", "HEAD", "OPTIONS"],
+    respect_retry_after_header=False,  # Significant: avoid long server-directed waits
+)
+
+# requests.Session is not reliably thread-safe for shared concurrent use.
+# Use one session per worker thread instead of one global shared session.
+_thread_local = threading.local()
+
+def _get_request_session() -> requests.Session:
+    session = getattr(_thread_local, "session", None)
+    if session is None:
+        session = requests.Session()
+        adapter = HTTPAdapter(max_retries=RETRY_STRATEGY)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        _thread_local.session = session
+    return session
+
 def fetch_text_from_url(url: str) -> str:
     """Download a URL and extract readable text from HTML or PDF."""
     try:
-        resp = requests.get(url, headers=DEFAULT_HEADERS, timeout=20)
+        session = _get_request_session()  # thread-local session
+        resp = session.get(url, headers=DEFAULT_HEADERS, timeout=DEFAULT_TIMEOUT)
     except Exception as e:
         print(f"[fetch_text_from_url] Error fetching {url}: {e}")
         return ""
@@ -726,18 +758,18 @@ def fetch_text_from_url(url: str) -> str:
 
     return "\n".join(text_chunks)
 
-# ---- 3. CORPUS BUILDER (with normalization + caching) ----
+# ---- 3. CORPUS BUILDER (structured sources + Streamlit caching) ----
 
-# Cache to only fetch each jurisdiction once per run
-_jurisdiction_corpus_cache: dict[str, str] = {}
-
+# Streamlit caches each built jurisdiction corpus so repeated queries
+# do not re-fetch the same curated source URLs on every rerun.
+@st.cache_data(show_spinner=False, ttl=24 * 60 * 60)
 def get_jurisdiction_corpus(jurisdiction: str) -> str:
     """
     Build or return a cached text corpus for a given jurisdiction.
 
     - Accepts any capitalization (e.g., 'federal', 'Federal', 'FEDERAL').
     - Uses NORM_KEYS to map to the canonical key in JURISDICTION_SOURCES.
-    - Returns an empty string for "thin" jurisdictions with no URLs configured.
+    - Returns an empty string for jurisdictions with no URLs configured.
     """
     if not jurisdiction:
         raise ValueError("Jurisdiction name is required.")
@@ -747,32 +779,25 @@ def get_jurisdiction_corpus(jurisdiction: str) -> str:
     if canonical is None:
         raise ValueError(f"Unknown jurisdiction: {jurisdiction!r}")
 
-    # Return from cache if available
-    if canonical in _jurisdiction_corpus_cache:
-        return _jurisdiction_corpus_cache[canonical]
+    # De-duplicate curated URLs before fetching.
+    urls = list(dict.fromkeys(get_source_urls(canonical)))
 
-    # Helper to get URLs (supports structured and legacy entries)
-    urls = get_source_urls(canonical)
-    # Thin jurisdictions: no URLs yet -> empty corpus (handled by callers)
+    # No configured sources for this jurisdiction
     if not urls:
-        _jurisdiction_corpus_cache[canonical] = ""
         return ""
 
-    print(f"Building corpus for jurisdiction: {canonical}")
-    pieces: list[str] = []
+    # Timing logs help diagnose slow jurisdictions during testing.
+    start = time.perf_counter()
+    print(f"Building corpus for jurisdiction: {canonical} ({len(urls)} urls)")
 
-    for url in urls:
-        try:
-            text = fetch_text_from_url(url)
-            if text:
-                pieces.append(text)
-        except Exception as e:
-            print(f"  !! Error fetching {url}: {e}")
-
+    # Fetch curated URLs in parallel for faster corpus construction.
+    pieces = fetch_all_text_parallel(urls, max_workers=4)
     corpus = "\n\n".join(pieces)
-    _jurisdiction_corpus_cache[canonical] = corpus
-    print(f"{len(corpus)} characters of text in the {canonical} corpus")
+
+    elapsed = time.perf_counter() - start
+    print(f"{len(corpus)} characters of text in the {canonical} corpus (built in {elapsed:.1f}s)")
     return corpus
+
 
 # ---- 4. SINGLE-JURISDICTION ANSWER ----
 def answer_ai_policy_question(jurisdiction: str, question: str) -> str:
@@ -1426,12 +1451,9 @@ if mode == "Ask about one government":
 
         <p>
         <strong>Technology stack:</strong>  
-        This app was developed using <strong>Python</strong> and <strong>Streamlit</strong>,  
-        with <strong>OpenAI’s GPT-5.1</strong> supporting the build process and  
-        <strong>GPT-4.1 mini</strong> powering the app and real-time responses  
-        (via paid API subscriptions).  
-        The development environment includes the <strong>Anaconda </strong> platform and  
-        <strong>Jupyter Notebook</strong> for testing and to ensure stability and reliability.
+        This app was developed using Python and Streamlit,  
+        with OpenAI's GPT-4.1 mini powering real-time responses.  
+        Early prototypes were developed in Jupyter Notebook (Anaconda platform) with coding assistance from GPT 5.1 but development now runs  primarily in Visual Studio Code with GitHub Copilot (Claude Haiku 4.5) supporting code generation, iteration, and refinement.  
         </p>
 
         <p>
